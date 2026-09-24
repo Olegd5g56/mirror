@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import getpass
 import re
 import shutil
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, time as dt_time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -151,20 +152,59 @@ def vacuum_temp_cmd(older_than_hours: int, apply: bool) -> None:
     click.echo(f"видалено: {removed}")
 
 
-@cli.command("import-legacy")
-@click.option("--source-url", required=True, help="postgresql://mirror:pass@host:5432/mirror")
-@click.option("--source-media", required=True, type=click.Path(exists=True, file_okay=False))
-def import_legacy_cmd(source_url: str, source_media: str) -> None:
-    """Перенести users/media/events/schedule зі старого Mirror, зберігши id."""
-    asyncio.run(_import_legacy(source_url, Path(source_media)))
+def _parse_legacy_time(value: str) -> dt_time:
+    hour, minute, second = value.split(":")
+    return dt_time(int(hour), int(minute), int(float(second)))
 
 
-async def _import_legacy(source_url: str, source_media: Path) -> None:
+def _parse_legacy_interval(value: str) -> timedelta:
+    parts = value.split(":")
+    if len(parts) != 3 or " " in value:
+        raise ValueError(f"незрозумілий interval: {value}")
+    hours, minutes, seconds = parts
+    return timedelta(hours=int(hours), minutes=int(minutes), seconds=float(seconds))
+
+
+def _parse_legacy_timestamp(value: str) -> datetime:
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+        try:
+            return datetime.strptime(value, fmt)
+        except ValueError:
+            continue
+    raise ValueError(f"незрозумілий timestamp: {value}")
+
+
+def _read_csv(path: Path) -> list[list[str]]:
+    with path.open(newline="") as handle:
+        return [row for row in csv.reader(handle) if row]
+
+
+def _load_legacy_dir(source_dir: Path):
+    users = [(row[0], row[1]) for row in _read_csv(source_dir / "users.csv")]
+    media_rows = [
+        (int(row[0]), row[1], row[2]) for row in _read_csv(source_dir / "media.csv")
+    ]
+    events = [
+        (
+            int(row[0]),
+            row[1],
+            _parse_legacy_time(row[2]),
+            _parse_legacy_interval(row[3]),
+            int(row[4]),
+        )
+        for row in _read_csv(source_dir / "events.csv")
+    ]
+    schedule = [
+        (int(row[0]), int(row[1]), _parse_legacy_timestamp(row[2]))
+        for row in _read_csv(source_dir / "schedule.csv")
+    ]
+    return users, media_rows, events, schedule
+
+
+def _load_legacy_url(source_url: str):
     import psycopg
 
-    kyiv = ZoneInfo(settings.tz)
     src = source_url.replace("postgresql+asyncpg://", "postgresql://")
-
     with psycopg.connect(src) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT login, password_hash FROM users")
@@ -175,6 +215,38 @@ async def _import_legacy(source_url: str, source_media: Path) -> None:
             events = cur.fetchall()
             cur.execute("SELECT id, media_id, start_at FROM schedule ORDER BY id")
             schedule = cur.fetchall()
+    return users, media_rows, events, schedule
+
+
+@cli.command("import-legacy")
+@click.option("--source-url", default=None, help="postgresql://mirror:pass@host:5432/mirror")
+@click.option("--source-dir", default=None, type=click.Path(exists=True, file_okay=False))
+@click.option("--source-media", required=True, type=click.Path(exists=True, file_okay=False))
+def import_legacy_cmd(source_url: str | None, source_dir: str | None, source_media: str) -> None:
+    """Перенести users/media/events/schedule зі старого Mirror, зберігши id.
+
+    Хеш пароля користувача з тим самим логіном, що вже є, замінюється.
+    """
+    if (source_url is None) == (source_dir is None):
+        click.echo("Потрібно рівно одне з --source-url або --source-dir.", err=True)
+        sys.exit(2)
+    asyncio.run(
+        _import_legacy(
+            source_url,
+            Path(source_dir) if source_dir else None,
+            Path(source_media),
+        )
+    )
+
+
+async def _import_legacy(
+    source_url: str | None, source_dir: Path | None, source_media: Path
+) -> None:
+    kyiv = ZoneInfo(settings.tz)
+    if source_dir is not None:
+        users, media_rows, events, schedule = _load_legacy_dir(source_dir)
+    else:
+        users, media_rows, events, schedule = _load_legacy_url(source_url or "")
 
     async with SessionLocal() as session:
         existing_admin = (await session.execute(select(User))).scalars().first()
@@ -183,11 +255,16 @@ async def _import_legacy(source_url: str, source_media: Path) -> None:
             sys.exit(1)
         uploader = existing_admin.id
 
+        replaced_hash = 0
         for login, password_hash in users:
             if login == existing_admin.username:
+                existing_admin.password_hash = password_hash
+                replaced_hash += 1
                 continue
             session.add(User(username=login, password_hash=password_hash))
         await session.commit()
+        if replaced_hash:
+            click.echo(f"оновлено хеш пароля для наявного користувача: {replaced_hash}")
 
         air = MEDIA_ROOT / "air"
         air.mkdir(parents=True, exist_ok=True)
