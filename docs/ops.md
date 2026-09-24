@@ -61,6 +61,9 @@ GET  /media/default.jpg
 HEAD /
 ```
 
+The client builds the request as `serverURL + "/api.php"`, so it actually sends
+`//api.php`. nginx passes it to the backend as `/api.php`.
+
 `path` has no leading slash. The client appends it to `serverURL`, which ends with `/`.
 If `path` did not change, the player does not restart.
 
