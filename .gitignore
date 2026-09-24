@@ -1,0 +1,57 @@
+# env
+.env
+.env.local
+*.env
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# node
+node_modules/
+dist/
+.vite/
+
+# media (tree stays, content does not)
+/media/temp/*
+/media/air/*
+/media/thumbs/*
+/media/posters/*
+!/media/temp/.gitkeep
+!/media/air/.gitkeep
+!/media/thumbs/.gitkeep
+!/media/posters/.gitkeep
+
+# tls
+/nginx/certs/*.pem
+/nginx/certs/*.key
+/nginx/certs/*.crt
+!/nginx/certs/.gitkeep
+
+# IDE/OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# logs
+*.log
+/logs/*
+!/logs/.gitkeep
+
+# prod snapshot (imported locally, never committed)
+/legacy/
+
+# notes for this checkout only
+/docs/local.md
+
+# frontend lock is committed; local npm junk is not
+frontend/node_modules/
+frontend/dist/

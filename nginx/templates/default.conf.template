@@ -1,0 +1,140 @@
+# nginx 1.25-alpine прогоняет *.template через envsubst.
+# Подставляются ${DOMAIN}, ${TLS_CERT_PATH}, ${TLS_KEY_PATH}.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${DOMAIN};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name ${DOMAIN};
+
+    ssl_certificate     ${TLS_CERT_PATH};
+    ssl_certificate_key ${TLS_KEY_PATH};
+    ssl_protocols       TLSv1.2 TLSv1.3;
+    ssl_ciphers         HIGH:!aNULL:!MD5;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+
+    add_header Strict-Transport-Security "max-age=15768000" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    client_max_body_size 1m;
+
+    root /usr/share/nginx/html;
+    index index.html;
+
+    location /api/hooks/ {
+        return 404;
+    }
+
+    location = /api/auth/verify {
+        return 404;
+    }
+
+    # TV client shim. No auth.
+    # proxy_pass через змінну — nginx резолвить backend на кожен запит,
+    # інакше після recreate контейнера ловимо 502 зі старим IP.
+    location = /api.php {
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $backend_upstream http://backend:8000;
+        client_max_body_size 1m;
+        proxy_pass $backend_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 15s;
+    }
+
+    location /api/ {
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $backend_upstream http://backend:8000;
+        client_max_body_size 1m;
+        proxy_pass $backend_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 60s;
+    }
+
+    location /files/ {
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $tusd_upstream http://tusd:8080;
+        proxy_pass $tusd_upstream;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_http_version 1.1;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_set_header Upgrade $http_upgrade;
+        client_max_body_size 0;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
+    location = /_auth_check {
+        internal;
+        resolver 127.0.0.11 valid=10s ipv6=off;
+        set $backend_verify http://backend:8000/api/auth/verify;
+        proxy_pass $backend_verify;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Original-URI $request_uri;
+    }
+
+    # On-air files. Public. Names match the TV client: /media/{id}.mp4 and /media/{id}.jpg.
+    location = /media/default.jpg {
+        alias /media/default.jpg;
+        autoindex off;
+        sendfile on;
+        tcp_nopush on;
+        expires 1d;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Cache-Control "public, max-age=60" always;
+    }
+
+    location ~ ^/media/([0-9]+\.(mp4|jpg))$ {
+        alias /media/air/$1;
+        autoindex off;
+        sendfile on;
+        tcp_nopush on;
+        expires 1d;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Cache-Control "public, max-age=60" always;
+    }
+
+    # Превью в админке — только с cookie.
+    location /media/thumbs/ {
+        auth_request /_auth_check;
+        alias /media/thumbs/;
+        autoindex off;
+        sendfile on;
+        expires 1d;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    location /media/posters/ {
+        auth_request /_auth_check;
+        alias /media/posters/;
+        autoindex off;
+        sendfile on;
+        expires 1d;
+        add_header X-Content-Type-Options "nosniff" always;
+    }
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
